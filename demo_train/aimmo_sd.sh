@@ -11,7 +11,8 @@ accelerate launch examples/text_to_image/train_text_to_image.py \
   --checkpointing_steps=5000 \
   --max_train_steps=100000 \
   --train_batch_size=8 \
-  --gradient_accumulation_steps=4 \
+  --gradient_accumulation_steps=1 \
+  --scale_lr \
   --gradient_checkpointing \
   --mixed_precision="fp16" \
   --use_8bit_adam \
@@ -19,5 +20,5 @@ accelerate launch examples/text_to_image/train_text_to_image.py \
   --max_grad_norm=1 \
   --lr_scheduler="constant" \
   --lr_warmup_steps=0 \
-  --output_dir=$OUTPUT_DIR
-  # --resume_from_checkpoint='checkpoint-5000'
+  --output_dir=$OUTPUT_DIR \
+  --resume_from_checkpoint='checkpoint-55000'

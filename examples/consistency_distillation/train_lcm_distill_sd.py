@@ -158,7 +158,7 @@ class CustomDataset(Dataset):
 
             except Exception as e:
                 idx = random.randint(0, self.length - 1)
-        print(caption)
+
         caption = self.tokenizer(
             caption,
             max_length=self.tokenizer.model_max_length,
@@ -1083,7 +1083,7 @@ def main(args):
                 # for i in range(0, pixel_values.shape[0], 32):
                 #     latents.append(vae.encode(pixel_values[i : i + 32]).latent_dist.sample())
                 # latents = torch.cat(latents, dim=0)
-                latents = vae.encode(pixel_values).latent_dist.sample()   
+                latents = vae.encode(pixel_values).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
                 latents = latents.to(weight_dtype)
 
