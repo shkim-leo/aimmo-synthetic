@@ -1,6 +1,6 @@
 export MODEL_NAME_PATH="/data/noah/ckpt/pretrain_ckpt/StableDiffusion/sd"
-export TRAIN_DIR="/data/noah/dataset/AD_CON"
-export OUTPUT_DIR="/data/noah/ckpt/finetuning/Control_MIDAS_SD_AD"
+export TRAIN_DIR="/data/noah/dataset/coco"
+export OUTPUT_DIR="/data/noah/ckpt/finetuning/controlnet_coco"
 
 accelerate launch examples/controlnet/train_controlnet.py \
  --pretrained_model_name_or_path=$MODEL_NAME_PATH \

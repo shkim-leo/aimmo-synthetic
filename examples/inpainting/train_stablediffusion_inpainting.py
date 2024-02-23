@@ -167,7 +167,7 @@ def random_mask(im_shape, ratio=1, mask_full_image=False):
     return mask
 
 
-def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, epoch, val_cnt=4):
+def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, global_step, epoch, val_cnt=8):
     logger.info("Running validation... ")
 
     pipeline = StableDiffusionInpaintPipeline.from_pretrained(
@@ -192,83 +192,56 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
     else:
         generator = torch.Generator(device=accelerator.device).manual_seed(args.seed)
 
-    # with open(self.annotations[idx], "r") as f:
-    #                 annotation = json.load(f)
-
-    #             image_path = os.path.join(annotation["parent_path"], annotation["filename"])
-    #             image = Image.open(image_path).convert("RGB")
-    #             pil_image = self.transforms(image)                                
-    #             pixel_value = self.transforms_post(pil_image)
-
-    #             caption_idx = random.randint(0, len(annotation["annotations"]) - 1)
-    #             caption = annotation["annotations"][caption_idx]["label"]
-
-    #             target_idxs = []
-    #             for idx, ann in enumerate(annotation["annotations"]):
-    #                 if ann["label"] == caption:
-    #                     target_idxs.append(idx)
-
-    #             assert len(target_idxs) >= 1, "target mask num must larger then 0"
-
-    #             generation_mask_num = random.randint(1, len(target_idxs))
-    #             target_idxs = random.sample(target_idxs, generation_mask_num)
-
-    #             mask = np.zeros((image.height, image.width))
-    #             for target_idx in target_idxs:
-    #                 points = np.array(annotation["annotations"][target_idx]["points"], dtype=np.int32)
-
-    #                 try:
-    #                     mask=cv2.fillPoly(mask, [points], color=255)
-    #                 except:
-    #                     continue
-
-    #             if not mask.any():
-    #                 raise Exception("mask sum is zero")
-
-    #             mask = Image.fromarray(mask.astype(np.uint8), mode="L").convert('RGB')
-    #             mask = mask.resize((pil_image.width, pil_image.height))
-    #             break
-
-
     images = []
+
     validation_path = os.path.join(args.train_data_dir, "anno")
-    
-    for anno_path in os.listdir(validation_path)[:val_cnt]:
-        with open(os.path.join(validation_path, anno_path), 'r') as f:
+
+    for idx, anno_path in enumerate(os.listdir(validation_path)[:val_cnt]):
+        with open(os.path.join(validation_path, anno_path), "r") as f:
             annotation = json.load(f)
         image_path = os.path.join(annotation["parent_path"], annotation["filename"])
         val_image = Image.open(image_path).convert("RGB")
         val_prompt = args.validation_prompts[0]
         caption_idx = random.randint(0, len(annotation["annotations"]) - 1)
         caption = annotation["annotations"][caption_idx]["label"]
-        
+
         target_idxs = []
         for idx, ann in enumerate(annotation["annotations"]):
             if ann["label"] == caption:
                 target_idxs.append(idx)
 
+        target_idxs = target_idxs[:5] if len(target_idxs) > 5 else target_idxs
+
         mask = np.zeros((val_image.height, val_image.width))
         for target_idx in target_idxs:
             points = np.array(annotation["annotations"][target_idx]["points"], dtype=np.int32)
             try:
-                mask=cv2.fillPoly(mask, [points], color=255)
+                mask = cv2.fillPoly(mask, [points], color=255)
             except:
                 continue
-        
+
         if not mask.any():
             continue
-        
+
         val_mask = Image.fromarray(mask.astype(np.uint8), mode="L").resize((args.resolution, args.resolution))
         val_image = val_image.resize((args.resolution, args.resolution))
-        
+
         with torch.autocast("cuda"):
             image = pipeline(prompt=val_prompt, image=val_image, mask_image=val_mask, generator=generator).images[0]
         images.append(image)
 
+        val_mask = val_mask.convert("RGB")
+
+        if epoch == 0:
+            val_image.save(os.path.join(args.output_dir, "validation", "{}".format(annotation["filename"])))
+            val_mask.save(os.path.join(args.output_dir, "validation", "mask_{}.png".format(annotation["filename"])))
+
+        image.save(os.path.join(args.output_dir, "validation", "{}_{}.png".format(annotation["filename"], epoch)))
+
     for tracker in accelerator.trackers:
         if tracker.name == "tensorboard":
             np_images = np.stack([np.asarray(img) for img in images])
-            tracker.writer.add_images("validation", np_images, epoch, dataformats="NHWC")
+            tracker.writer.add_images("validation", np_images, global_step, dataformats="NHWC")
         elif tracker.name == "wandb":
             tracker.log(
                 {
@@ -608,21 +581,26 @@ def prepare_mask_and_masked_image(image, mask):
 
 
 class CustomDataset(Dataset):
-    def __init__(self, csv_path, resolution, tokenizer):
-        self.annotations = [os.path.join(csv_path, path) for path in os.listdir(csv_path)]
-        print(f"data scale: {len(self.annotations)}")
+    def __init__(self, base_path, ann_path, resolution, tokenizer):
+        # self.annotations = [os.path.join(ann_path, path) for path in os.listdir(ann_path)]
+        # print(f"data scale: {len(self.annotations)}")
+
+        self.base_path = base_path
+        self.annotations = []
+        with open(ann_path, "r", encoding="utf-8") as f:
+            for line in f:
+                self.annotations.append(json.loads(line))
 
         self.tokenizer = tokenizer
-        
+
         self.transforms = transforms.Compose(
             [
-                # transforms.RandomHorizontalFlip(),
                 transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(resolution),
-                transforms.RandomHorizontalFlip(),
+                # transforms.RandomHorizontalFlip(),
             ]
         )
-        
+
         self.transforms_post = transforms.Compose(
             [
                 transforms.ToTensor(),
@@ -633,45 +611,44 @@ class CustomDataset(Dataset):
     def __getitem__(self, idx):
         while True:
             try:
-                with open(self.annotations[idx], "r") as f:
+                anno_path = os.path.join(self.base_path, self.annotations[idx]["annotation"])
+                with open(anno_path, "r") as f:
                     annotation = json.load(f)
 
                 image_path = os.path.join(annotation["parent_path"], annotation["filename"])
                 image = Image.open(image_path).convert("RGB")
-                pil_image = self.transforms(image)                                
+                pil_image = self.transforms(image)
                 pixel_value = self.transforms_post(pil_image)
 
-                caption_idx = random.randint(0, len(annotation["annotations"]) - 1)
-                caption = annotation["annotations"][caption_idx]["label"]
+                caption = self.annotations[idx]["text"]
 
-                target_idxs = []
-                for idx, ann in enumerate(annotation["annotations"]):
-                    if ann["label"] == caption:
-                        target_idxs.append(idx)
-
-                assert len(target_idxs) >= 1, "target mask num must larger then 0"
-
-                generation_mask_num = random.randint(1, len(target_idxs))
-                target_idxs = random.sample(target_idxs, generation_mask_num)
+                generation_mask_num = random.randint(1, len(annotation["annotations"]))
+                generation_mask_num = 5 if generation_mask_num >= 5 else generation_mask_num
+                target_anno = random.sample(annotation["annotations"], generation_mask_num)  # generation_mask_num
 
                 mask = np.zeros((image.height, image.width))
-                for target_idx in target_idxs:
-                    points = np.array(annotation["annotations"][target_idx]["points"], dtype=np.int32)
+
+                for ta in target_anno:
+                    points = np.array(ta["points"], dtype=np.int32)
 
                     try:
-                        mask=cv2.fillPoly(mask, [points], color=255)
+                        mask = cv2.fillPoly(mask, [points], color=255)
                     except:
                         continue
 
                 if not mask.any():
                     raise Exception("mask sum is zero")
 
-                mask = Image.fromarray(mask.astype(np.uint8), mode="L").convert('RGB')
-                mask = mask.resize((pil_image.width, pil_image.height))
+                mask = Image.fromarray(mask.astype(np.uint8), mode="L").convert("RGB")
+                mask = self.transforms(mask)
+
+                if not np.array(mask.convert("L")).any():
+                    raise Exception("mask sum is zero")
+
                 break
 
             except Exception as e:
-                print(e)
+                # print(e)
                 idx = random.randint(0, len(self.annotations) - 1)
 
         caption = self.tokenizer(
@@ -894,7 +871,12 @@ def main():
 
         return {"pixel_values": pixel_values, "input_ids": input_ids, "masks": masks, "masked_images": masked_images}
 
-    train_dataset = CustomDataset(os.path.join(args.train_data_dir, "anno"), args.resolution, tokenizer)
+    train_dataset = CustomDataset(
+        args.train_data_dir,
+        os.path.join(args.train_data_dir, "train.jsonl"),
+        args.resolution,
+        tokenizer,
+    )
 
     with accelerator.main_process_first():
         if args.max_train_samples is not None:
@@ -1158,21 +1140,11 @@ def main():
                     # Store the UNet parameters temporarily and load the EMA parameters to perform inference.
                     ema_unet.store(unet.parameters())
                     ema_unet.copy_to(unet.parameters())
-                images = log_validation(
-                    vae,
-                    text_encoder,
-                    tokenizer,
-                    unet,
-                    args,
-                    accelerator,
-                    weight_dtype,
-                    global_step,
-                )
 
                 validation_folder = os.path.join(args.output_dir, "validation")
                 os.makedirs(validation_folder, exist_ok=True)
-                for idx, image in enumerate(images):
-                    image.save(os.path.join(validation_folder, "{}_{}.png".format(epoch, idx)))
+
+                log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight_dtype, global_step, epoch)
 
                 if args.use_ema:
                     # Switch back to the original UNet parameters.
