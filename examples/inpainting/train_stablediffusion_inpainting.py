@@ -194,48 +194,56 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
 
     images = []
 
-    validation_path = os.path.join(args.train_data_dir, "anno")
+    annotations = []
+    with open(os.path.join(args.train_data_dir, "train.jsonl"), "r", encoding="utf-8") as f:
+        for line in f:
+            annotations.append(json.loads(line))
 
-    for idx, anno_path in enumerate(os.listdir(validation_path)[:val_cnt]):
-        with open(os.path.join(validation_path, anno_path), "r") as f:
+    for idx, anno in enumerate(annotations[:val_cnt]):
+        with open(os.path.join(args.train_data_dir, anno["annotation"]), "r") as f:
             annotation = json.load(f)
-        image_path = os.path.join(annotation["parent_path"], annotation["filename"])
+
+        image_path = os.path.join(args.train_data_dir, anno["image"])
+        caption = anno["text"]
+
         val_image = Image.open(image_path).convert("RGB")
-        val_prompt = args.validation_prompts[0]
-        caption_idx = random.randint(0, len(annotation["annotations"]) - 1)
-        caption = annotation["annotations"][caption_idx]["label"]
 
-        target_idxs = []
-        for idx, ann in enumerate(annotation["annotations"]):
-            if ann["label"] == caption:
-                target_idxs.append(idx)
-
-        target_idxs = target_idxs[:5] if len(target_idxs) > 5 else target_idxs
+        generation_mask_num = random.randint(1, len(annotation["annotations"]))
+        generation_mask_num = 5 if generation_mask_num >= 5 else generation_mask_num
+        target_anno = random.sample(annotation["annotations"], generation_mask_num)  # generation_mask_num
 
         mask = np.zeros((val_image.height, val_image.width))
-        for target_idx in target_idxs:
-            points = np.array(annotation["annotations"][target_idx]["points"], dtype=np.int32)
+
+        for ta in target_anno:
+            points = np.array(ta["points"], dtype=np.int32)
+
             try:
                 mask = cv2.fillPoly(mask, [points], color=255)
             except:
                 continue
 
         if not mask.any():
-            continue
+            raise Exception("mask sum is zero")
 
-        val_mask = Image.fromarray(mask.astype(np.uint8), mode="L").resize((args.resolution, args.resolution))
-        val_image = val_image.resize((args.resolution, args.resolution))
+        mask = Image.fromarray(mask)
 
         with torch.autocast("cuda"):
-            image = pipeline(prompt=val_prompt, image=val_image, mask_image=val_mask, generator=generator).images[0]
+            image = pipeline(
+                prompt=caption,
+                image=val_image,
+                mask_image=mask,
+                height=args.resolution,
+                width=args.resolution,
+                generator=generator,
+            ).images[0]
         images.append(image)
 
-        val_mask = val_mask.convert("RGB")
+        mask = mask.convert("RGB")
 
         if epoch == 0:
             val_image.save(os.path.join(args.output_dir, "validation", "{}".format(annotation["filename"])))
-            val_mask.save(os.path.join(args.output_dir, "validation", "mask_{}.png".format(annotation["filename"])))
 
+        mask.save(os.path.join(args.output_dir, "validation", "{}_{}_mask.png".format(annotation["filename"], epoch)))
         image.save(os.path.join(args.output_dir, "validation", "{}_{}.png".format(annotation["filename"], epoch)))
 
     for tracker in accelerator.trackers:
@@ -663,6 +671,7 @@ class CustomDataset(Dataset):
         return sample
 
     def __len__(self):
+        # return 1
         return len(self.annotations)
 
 

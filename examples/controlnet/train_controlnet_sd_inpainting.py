@@ -181,9 +181,9 @@ def log_validation(
     feature_extractor = CLIPImageProcessor.from_pretrained(
         os.path.join(args.pretrained_model_name_or_path, "feature_extractor")
     )
-    image_encoder = CLIPVisionModelWithProjection.from_pretrained(
-        os.path.join(args.pretrained_model_name_or_path, "image_encoder")
-    )
+    # image_encoder = CLIPVisionModelWithProjection.from_pretrained(
+    #     os.path.join(args.pretrained_model_name_or_path, "image_encoder")
+    # )
 
     pipeline = StableDiffusionControlNetInpaintPipeline.from_pretrained(
         args.pretrained_model_name_or_path,
@@ -193,7 +193,7 @@ def log_validation(
         unet=unet,
         controlnet=controlnet,
         feature_extractor=feature_extractor,
-        image_encoder=image_encoder,
+        # image_encoder=image_encoder,
         safety_checker=None,
         revision=args.revision,
         variant=args.variant,
@@ -226,10 +226,10 @@ def log_validation(
         caption = anno["text"]
 
         val_image = Image.open(image_path).convert("RGB")
-        val_control_image = Image.open(control_path).convert("RGB")
+        val_control_image = Image.open(control_path)
 
         generation_mask_num = random.randint(1, len(annotation["annotations"]))
-        generation_mask_num = 5 if generation_mask_num >= 5 else generation_mask_num
+        generation_mask_num = 3 if generation_mask_num >= 3 else generation_mask_num
         target_anno = random.sample(annotation["annotations"], generation_mask_num)  # generation_mask_num
 
         mask = np.zeros((val_image.height, val_image.width))
@@ -244,6 +244,8 @@ def log_validation(
 
         if not mask.any():
             raise Exception("mask sum is zero")
+
+        mask = Image.fromarray(mask)
 
         with torch.autocast("cuda"):
             image = pipeline(
@@ -261,11 +263,11 @@ def log_validation(
 
         if epoch == 0:
             val_image.save(os.path.join(args.output_dir, "validation", "{}".format(annotation["filename"])))
-            mask.save(os.path.join(args.output_dir, "validation", "mask_{}.png".format(annotation["filename"])))
             val_control_image.save(
                 os.path.join(args.output_dir, "validation", "condition_{}.png".format(annotation["filename"]))
             )
 
+        mask.save(os.path.join(args.output_dir, "validation", "{}_{}_mask.png".format(annotation["filename"], epoch)))
         image.save(os.path.join(args.output_dir, "validation", "{}_{}.png".format(annotation["filename"], epoch)))
 
     for tracker in accelerator.trackers:
@@ -308,6 +310,15 @@ def parse_args():
         default=None,
         required=False,
         help="Revision of pretrained model identifier from huggingface.co/models.",
+    )
+    parser.add_argument(
+        "--set_grads_to_none",
+        action="store_true",
+        help=(
+            "Save more memory by using setting grads to None instead of zero. Be aware, that this changes certain"
+            " behaviors, so disable this argument if it causes any problems. More info:"
+            " https://pytorch.org/docs/stable/generated/torch.optim.Optimizer.zero_grad.html"
+        ),
     )
     parser.add_argument(
         "--variant",
@@ -672,7 +683,7 @@ class CustomDataset(Dataset):
                 caption = self.annotations[idx]["text"]
 
                 generation_mask_num = random.randint(1, len(annotation["annotations"]))
-                generation_mask_num = 5 if generation_mask_num >= 5 else generation_mask_num
+                generation_mask_num = 3 if generation_mask_num >= 3 else generation_mask_num
                 target_anno = random.sample(annotation["annotations"], generation_mask_num)  # generation_mask_num
 
                 mask = np.zeros((image.height, image.width))
@@ -719,6 +730,7 @@ class CustomDataset(Dataset):
 
     def __len__(self):
         return len(self.annotations)
+        # return 1
 
 
 def main():
@@ -868,6 +880,12 @@ def main():
     if args.gradient_checkpointing:
         controlnet.enable_gradient_checkpointing()
 
+    # Function for unwrapping if model was compiled with `torch.compile`.
+    def unwrap_model(model):
+        model = accelerator.unwrap_model(model)
+        model = model._orig_mod if is_compiled_module(model) else model
+        return model
+
     # Check that all trainable models are in full precision
     low_precision_error_string = (
         " Please make sure to always have all model weights in full float32 precision when starting training - even if"
@@ -1010,12 +1028,6 @@ def main():
         tracker_config.pop("validation_prompts")
         accelerator.init_trackers(args.tracker_project_name, tracker_config)
 
-    # Function for unwrapping if model was compiled with `torch.compile`.
-    def unwrap_model(model):
-        model = accelerator.unwrap_model(model)
-        model = model._orig_mod if is_compiled_module(model) else model
-        return model
-
     # Train!
     total_batch_size = args.train_batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -1139,7 +1151,7 @@ def main():
 
                 # Predict the noise residual and compute loss
                 model_pred = unet(
-                    latent_model_input,
+                    latent_model_input.to(dtype=weight_dtype),
                     timesteps,
                     encoder_hidden_states=encoder_hidden_states,
                     down_block_additional_residuals=[

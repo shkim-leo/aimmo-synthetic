@@ -13,7 +13,7 @@ accelerate launch examples/controlnet/train_controlnet.py \
  --gradient_accumulation_steps=4 \
  --mixed_precision="fp16" \
  --max_train_steps=100000 \
- --checkpointing_steps=5000 \
+ --checkpointing_steps=10000 \
  --train_batch_size=4 \
  --use_8bit_adam \
  --gradient_checkpointing \
