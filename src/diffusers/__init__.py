@@ -1,8 +1,6 @@
 __version__ = "0.26.0.dev0"
 
 from typing import TYPE_CHECKING
-from .blip.models.blip import blip_decoder
-from .gmflow.gmflow import GMFlow
 
 from .utils import (
     DIFFUSERS_SLOW_IMPORT,
@@ -269,6 +267,7 @@ else:
             "StableDiffusionAttendAndExcitePipeline",
             "StableDiffusionControlNetImg2ImgPipeline",
             "StableDiffusionControlNetInpaintPipeline",
+            "StableDiffusionDisControlNetInpaintPipeline",
             "StableDiffusionControlNetPipeline",
             "StableDiffusionDepth2ImgPipeline",
             "StableDiffusionDiffEditPipeline",
@@ -647,6 +646,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             StableDiffusionAttendAndExcitePipeline,
             StableDiffusionControlNetImg2ImgPipeline,
             StableDiffusionControlNetInpaintPipeline,
+            StableDiffusionDisControlNetInpaintPipeline,
             StableDiffusionControlNetPipeline,
             StableDiffusionDepth2ImgPipeline,
             StableDiffusionDiffEditPipeline,

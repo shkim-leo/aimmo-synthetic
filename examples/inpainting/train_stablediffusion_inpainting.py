@@ -215,10 +215,9 @@ def log_validation(vae, text_encoder, tokenizer, unet, args, accelerator, weight
         mask = np.zeros((val_image.height, val_image.width))
 
         for ta in target_anno:
-            points = np.array(ta["points"], dtype=np.int32)
-
+            point = np.array(ta["points"], dtype=np.int32)
             try:
-                mask = cv2.fillPoly(mask, [points], color=255)
+                mask = cv2.fillPoly(mask, [point], color=255)
             except:
                 continue
 
@@ -637,10 +636,9 @@ class CustomDataset(Dataset):
                 mask = np.zeros((image.height, image.width))
 
                 for ta in target_anno:
-                    points = np.array(ta["points"], dtype=np.int32)
-
+                    point = np.array(ta['points'], dtype=np.int32)
                     try:
-                        mask = cv2.fillPoly(mask, [points], color=255)
+                        mask = cv2.fillPoly(mask, [point], color=255)
                     except:
                         continue
 

@@ -1,0 +1,1 @@
+python scripts/predict_for_dir.py DucoNet duconet1024.pth --images /data/noah/inference/magna/generated_images --masks /data/noah/inference/magna/generated_masks --resize 1024 --original-size --gpu 1 --results-path /data/noah/inference/magna/result

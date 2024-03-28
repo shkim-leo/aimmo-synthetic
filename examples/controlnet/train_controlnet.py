@@ -602,7 +602,7 @@ def make_train_dataset(args, tokenizer, accelerator):
             dataset = load_dataset(
                 args.train_data_dir,
                 cache_dir=args.cache_dir,
-                data_files=os.path.join(args.train_data_dir, "train.jsonl"),
+                data_files=os.path.join(args.train_data_dir, "train_2.jsonl"),
             )
         # See more about loading custom images at
         # https://huggingface.co/docs/datasets/v2.0.0/en/dataset_script

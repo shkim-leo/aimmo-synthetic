@@ -113,8 +113,8 @@ else:
         "AnimateDiffPipeline",
         "AnimateDiffVideoToVideoPipeline",
         "AnimateDiffControlNetPipeline",
-        "AnimateDiffControlNetXLPipeline"
-        ]
+        "AnimateDiffControlNetXLPipeline",
+    ]
     _import_structure["audioldm"] = ["AudioLDMPipeline"]
     _import_structure["audioldm2"] = [
         "AudioLDM2Pipeline",
@@ -127,6 +127,7 @@ else:
             "BlipDiffusionControlNetPipeline",
             "StableDiffusionControlNetImg2ImgPipeline",
             "StableDiffusionControlNetInpaintPipeline",
+            "StableDiffusionDisControlNetInpaintPipeline",
             "StableDiffusionControlNetPipeline",
             "StableDiffusionXLControlNetReferencePipeline",
             "StableDiffusionXLControlNetImg2ImgPipeline",
@@ -204,7 +205,12 @@ else:
         "StableDiffusionGLIGENPipeline",
         "StableDiffusionGLIGENTextImagePipeline",
     ]
-    _import_structure["stable_video_diffusion"] = ["StableVideoDiffusionPipeline", "StableVideoDiffusionLCMPipeline", "StableVideoDiffusionVid2VidPipeline", "StableVideoDiffusionControlNetPipeline"]
+    _import_structure["stable_video_diffusion"] = [
+        "StableVideoDiffusionPipeline",
+        "StableVideoDiffusionLCMPipeline",
+        "StableVideoDiffusionVid2VidPipeline",
+        "StableVideoDiffusionControlNetPipeline",
+    ]
     _import_structure["stable_diffusion_xl"].extend(
         [
             "StableDiffusionXLImg2ImgPipeline",
@@ -354,7 +360,12 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from ..utils.dummy_torch_and_transformers_objects import *
     else:
         from .amused import AmusedImg2ImgPipeline, AmusedInpaintPipeline, AmusedPipeline
-        from .animatediff import AnimateDiffPipeline, AnimateDiffVideoToVideoPipeline, AnimateDiffControlNetPipeline, AnimateDiffControlNetXLPipeline
+        from .animatediff import (
+            AnimateDiffPipeline,
+            AnimateDiffVideoToVideoPipeline,
+            AnimateDiffControlNetPipeline,
+            AnimateDiffControlNetXLPipeline,
+        )
         from .audioldm import AudioLDMPipeline
         from .audioldm2 import (
             AudioLDM2Pipeline,
@@ -366,6 +377,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
             BlipDiffusionControlNetPipeline,
             StableDiffusionControlNetImg2ImgPipeline,
             StableDiffusionControlNetInpaintPipeline,
+            StableDiffusionDisControlNetInpaintPipeline,
             StableDiffusionControlNetPipeline,
             StableDiffusionXLControlNetReferencePipeline,
             StableDiffusionXLControlNetImg2ImgPipeline,

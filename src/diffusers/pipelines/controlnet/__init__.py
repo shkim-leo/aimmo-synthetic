@@ -27,6 +27,7 @@ else:
     _import_structure["pipeline_controlnet_blip_diffusion"] = ["BlipDiffusionControlNetPipeline"]
     _import_structure["pipeline_controlnet_img2img"] = ["StableDiffusionControlNetImg2ImgPipeline"]
     _import_structure["pipeline_controlnet_inpaint"] = ["StableDiffusionControlNetInpaintPipeline"]
+    _import_structure["pipeline_dis_controlnet_inpaint"] = ["StableDiffusionDisControlNetInpaintPipeline"]
     _import_structure["pipeline_controlnet_inpaint_sd_xl"] = ["StableDiffusionXLControlNetInpaintPipeline"]
     _import_structure["pipeline_controlnet_sd_xl"] = ["StableDiffusionXLControlNetPipeline"]
     _import_structure["pipeline_controlnet_sd_xl_img2img"] = ["StableDiffusionXLControlNetImg2ImgPipeline"]
@@ -55,6 +56,7 @@ if TYPE_CHECKING or DIFFUSERS_SLOW_IMPORT:
         from .pipeline_controlnet_blip_diffusion import BlipDiffusionControlNetPipeline
         from .pipeline_controlnet_img2img import StableDiffusionControlNetImg2ImgPipeline
         from .pipeline_controlnet_inpaint import StableDiffusionControlNetInpaintPipeline
+        from .pipeline_dis_controlnet_inpaint import StableDiffusionDisControlNetInpaintPipeline
         from .pipeline_controlnet_inpaint_sd_xl import StableDiffusionXLControlNetInpaintPipeline
         from .pipeline_controlnet_sd_xl import StableDiffusionXLControlNetPipeline
         from .pipeline_controlnet_sd_xl_img2img import StableDiffusionXLControlNetImg2ImgPipeline

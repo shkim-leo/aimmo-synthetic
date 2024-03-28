@@ -3,11 +3,11 @@ import torch
 from PIL import Image
 import numpy as np
 
-from diffusers import StableUnCLIPSAGImg2ImgPipeline
+from diffusers import StableUnCLIPSAGImg2ImgPipeline, DDIMScheduler
 from torchvision import transforms
 from torchvision.transforms.functional import InterpolationMode
 
-from diffusers.blip.models.blip import blip_decoder
+# from diffusers.blip.models.blip import blip_decoder
 
 
 def load_demo_image(image_path, image_size, device):
@@ -33,46 +33,48 @@ torch.cuda.set_device(torch.device(device))  # change allocation of current GPU
 
 
 base_model_path = "/data/noah/ckpt/finetuning/SD_UNCLIP_AD"
-image_dir = "/data/noah/inference/data_filtering_2/input"
-out_dir = "/data/noah/inference/data_filtering_2/output"
+image_dir = "/data/noah/inference/test"
+out_dir = "/data/noah/inference/data_filtering/out"
 
 prompt = "{}, best quality, extremely detailed, clearness, naturalness, film grain, crystal clear, photo with color, actuality"
 negative_prompt = "cartoon, anime, painting, disfigured, immature, blur, picture, 3D, render, semi-realistic, drawing, poorly drawn, bad anatomy, wrong anatomy, gray scale, worst quality, low quality, sketch"
 
-clip_image_size = 512
-clip_model_path = "/data/noah/ckpt/pretrain_ckpt/BLIP/model_large_caption.pth"
-clip_model = blip_decoder(pretrained=clip_model_path, image_size=clip_image_size, vit="large")
-clip_model.eval()
-clip_model = clip_model.to(device)
+# clip_image_size = 512
+# clip_model_path = "/data/noah/ckpt/pretrain_ckpt/BLIP/model_large_caption.pth"
+# clip_model = blip_decoder(pretrained=clip_model_path, image_size=clip_image_size, vit="large")
+# clip_model.eval()
+# clip_model = clip_model.to(device)
 
 if not os.path.isdir(out_dir):
     os.mkdir(out_dir)
 
 pipe = StableUnCLIPSAGImg2ImgPipeline.from_pretrained(base_model_path, torch_dtype=torch.float16)
 pipe = pipe.to(device)
+pipe.scheduler = DDIMScheduler.from_config(pipe.scheduler.config)
 
 for img_name in os.listdir(image_dir):
     img_path = os.path.join(image_dir, img_name)
 
     init_image = Image.open(img_path).convert("RGB")
     result_size = (1024, 1024)
-    init_image.thumbnail((768, 768), Image.ANTIALIAS)
+    init_image.resize((768,768))
+    # init_image.thumbnail((768, 768), Image.ANTIALIAS)
     # init_image.thumbnail((768, 768))
 
     with torch.no_grad():
-        clip_image = load_demo_image(image_path=img_path, image_size=clip_image_size, device=device)
-        caption = clip_model.generate(clip_image, sample=False, num_beams=3, max_length=40, min_length=5)[0]
+        # clip_image = load_demo_image(image_path=img_path, image_size=clip_image_size, device=device)
+        # caption = clip_model.generate(clip_image, sample=False, num_beams=3, max_length=40, min_length=5)[0]
 
         # Pipe to make the variation
         image = pipe(
             init_image,
-            prompt=prompt.format(caption),
+            prompt=prompt.format("car is driving on the road"),
             negative_prompt=negative_prompt,
-            guidance_scale=7.0,
-            num_inference_steps=40,
+            guidance_scale=7.5,
+            num_inference_steps=25,
             noise_level=0,
         ).images[0]
 
         image = image.resize(result_size)
 
-    image.save(os.path.join(out_dir, "4_" + img_name))
+    image.save(os.path.join(out_dir, img_name))

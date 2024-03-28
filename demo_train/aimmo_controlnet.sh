@@ -1,9 +1,11 @@
 export MODEL_NAME_PATH="/data/noah/ckpt/pretrain_ckpt/StableDiffusion/sd"
-export TRAIN_DIR="/data/noah/dataset/coco"
-export OUTPUT_DIR="/data/noah/ckpt/finetuning/controlnet_coco"
+export CONTROLNET_MODEL_PATH="/data/noah/ckpt/pretrain_ckpt/StableDiffusion/controlnet_depth"
+export TRAIN_DIR="/data/noah/dataset/AD_CON"
+export OUTPUT_DIR="/data/noah/ckpt/finetuning/Control_Depth_SD_AD"
 
 accelerate launch examples/controlnet/train_controlnet.py \
  --pretrained_model_name_or_path=$MODEL_NAME_PATH \
+ --controlnet_model_name_or_path=$CONTROLNET_MODEL_PATH \
  --output_dir=$OUTPUT_DIR \
  --train_data_dir=$TRAIN_DIR \
  --enable_xformers_memory_efficient_attention \

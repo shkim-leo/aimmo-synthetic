@@ -103,6 +103,46 @@ EXAMPLE_DOC_STRING = """
 """
 
 
+# processes and stores attention probabilities
+class CrossAttnStoreProcessor:
+    def __init__(self):
+        self.attention_probs = None
+
+    def __call__(
+        self,
+        attn,
+        hidden_states,
+        encoder_hidden_states=None,
+        attention_mask=None,
+    ):
+        batch_size, sequence_length, _ = hidden_states.shape
+        attention_mask = attn.prepare_attention_mask(attention_mask, sequence_length, batch_size)
+        query = attn.to_q(hidden_states)
+
+        if encoder_hidden_states is None:
+            encoder_hidden_states = hidden_states
+        elif attn.norm_cross:
+            encoder_hidden_states = attn.norm_encoder_hidden_states(encoder_hidden_states)
+
+        key = attn.to_k(encoder_hidden_states)
+        value = attn.to_v(encoder_hidden_states)
+
+        query = attn.head_to_batch_dim(query)
+        key = attn.head_to_batch_dim(key)
+        value = attn.head_to_batch_dim(value)
+
+        self.attention_probs = attn.get_attention_scores(query, key, attention_mask)
+        hidden_states = torch.bmm(self.attention_probs, value)
+        hidden_states = attn.batch_to_head_dim(hidden_states)
+
+        # linear proj
+        hidden_states = attn.to_out[0](hidden_states)
+        # dropout
+        hidden_states = attn.to_out[1](hidden_states)
+
+        return hidden_states
+
+
 # Copied from diffusers.pipelines.stable_diffusion.pipeline_stable_diffusion_img2img.retrieve_latents
 def retrieve_latents(
     encoder_output: torch.Tensor, generator: Optional[torch.Generator] = None, sample_mode: str = "sample"
@@ -1126,6 +1166,7 @@ class StableDiffusionControlNetInpaintPipeline(
         strength: float = 1.0,
         num_inference_steps: int = 50,
         guidance_scale: float = 7.5,
+        sag_scale: float = 0.75,
         negative_prompt: Optional[Union[str, List[str]]] = None,
         num_images_per_prompt: Optional[int] = 1,
         eta: float = 0.0,
@@ -1310,6 +1351,7 @@ class StableDiffusionControlNetInpaintPipeline(
             padding_mask_crop,
         )
 
+        do_self_attention_guidance = sag_scale > 0.0
         self._guidance_scale = guidance_scale
         self._clip_skip = clip_skip
         self._cross_attention_kwargs = cross_attention_kwargs
@@ -1475,6 +1517,7 @@ class StableDiffusionControlNetInpaintPipeline(
 
         # 7.1 Add image embeds for IP-Adapter
         added_cond_kwargs = {"image_embeds": image_embeds} if ip_adapter_image is not None else None
+        added_uncond_kwargs = {"image_embeds": None}
 
         # 7.2 Create tensor stating which controlnets to keep
         controlnet_keep = []
@@ -1487,105 +1530,161 @@ class StableDiffusionControlNetInpaintPipeline(
 
         # 8. Denoising loop
         num_warmup_steps = len(timesteps) - num_inference_steps * self.scheduler.order
-        with self.progress_bar(total=num_inference_steps) as progress_bar:
-            for i, t in enumerate(timesteps):
-                # expand the latents if we are doing classifier free guidance
-                latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
-                latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                # predict the noise residual
-                if num_channels_unet == 9:
-                    latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+        ###
+        store_processor = CrossAttnStoreProcessor()
+        self.controlnet.mid_block.attentions[0].transformer_blocks[0].attn1.processor = store_processor
+        map_size = None
 
-                # controlnet(s) inference
-                if guess_mode and self.do_classifier_free_guidance:
-                    # Infer ControlNet only for the conditional batch.
-                    control_model_input = latents
-                    control_model_input = self.scheduler.scale_model_input(control_model_input, t)
-                    controlnet_prompt_embeds = prompt_embeds.chunk(2)[1]
-                else:
-                    control_model_input = latent_model_input
-                    controlnet_prompt_embeds = prompt_embeds
+        def get_map_size(module, input, output):
+            nonlocal map_size
+            map_size = output[0].shape[-2:]
 
-                if isinstance(controlnet_keep[i], list):
-                    cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
-                else:
-                    controlnet_cond_scale = controlnet_conditioning_scale
-                    if isinstance(controlnet_cond_scale, list):
-                        controlnet_cond_scale = controlnet_cond_scale[0]
-                    cond_scale = controlnet_cond_scale * controlnet_keep[i]
+        ###
 
-                down_block_res_samples, mid_block_res_sample = self.controlnet(
-                    control_model_input,
-                    t,
-                    encoder_hidden_states=controlnet_prompt_embeds,
-                    controlnet_cond=control_image,
-                    conditioning_scale=cond_scale,
-                    guess_mode=guess_mode,
-                    return_dict=False,
-                )
+        with self.controlnet.mid_block.attentions[0].register_forward_hook(get_map_size):
+            with self.progress_bar(total=num_inference_steps) as progress_bar:
+                for i, t in enumerate(timesteps):
+                    # expand the latents if we are doing classifier free guidance
+                    latent_model_input = torch.cat([latents] * 2) if self.do_classifier_free_guidance else latents
+                    latent_model_input = self.scheduler.scale_model_input(latent_model_input, t)
 
-                if guess_mode and self.do_classifier_free_guidance:
-                    # Infered ControlNet only for the conditional batch.
-                    # To apply the output of ControlNet to both the unconditional and conditional batches,
-                    # add 0 to the unconditional batch to keep it unchanged.
-                    down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
-                    mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
+                    # predict the noise residual
+                    if num_channels_unet == 9:
+                        latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
 
-                # # predict the noise residual
-                # if num_channels_unet == 9:
-                #     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
-
-                noise_pred = self.unet(
-                    latent_model_input,
-                    t,
-                    encoder_hidden_states=prompt_embeds,
-                    cross_attention_kwargs=self.cross_attention_kwargs,
-                    down_block_additional_residuals=down_block_res_samples,
-                    mid_block_additional_residual=mid_block_res_sample,
-                    added_cond_kwargs=added_cond_kwargs,
-                    return_dict=False,
-                )[0]
-
-                # perform guidance
-                if self.do_classifier_free_guidance:
-                    noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
-                    noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
-
-                # compute the previous noisy sample x_t -> x_t-1
-                latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
-
-                if num_channels_unet == 4:
-                    init_latents_proper = image_latents
-                    if self.do_classifier_free_guidance:
-                        init_mask, _ = mask.chunk(2)
+                    # controlnet(s) inference
+                    if guess_mode and self.do_classifier_free_guidance:
+                        # Infer ControlNet only for the conditional batch.
+                        control_model_input = latents
+                        control_model_input = self.scheduler.scale_model_input(control_model_input, t)
+                        controlnet_prompt_embeds = prompt_embeds.chunk(2)[1]
                     else:
-                        init_mask = mask
+                        control_model_input = latent_model_input
+                        controlnet_prompt_embeds = prompt_embeds
 
-                    if i < len(timesteps) - 1:
-                        noise_timestep = timesteps[i + 1]
-                        init_latents_proper = self.scheduler.add_noise(
-                            init_latents_proper, noise, torch.tensor([noise_timestep])
+                    if isinstance(controlnet_keep[i], list):
+                        cond_scale = [c * s for c, s in zip(controlnet_conditioning_scale, controlnet_keep[i])]
+                    else:
+                        controlnet_cond_scale = controlnet_conditioning_scale
+                        if isinstance(controlnet_cond_scale, list):
+                            controlnet_cond_scale = controlnet_cond_scale[0]
+                        cond_scale = controlnet_cond_scale * controlnet_keep[i]
+
+                    down_block_res_samples, mid_block_res_sample = self.controlnet(
+                        control_model_input,
+                        t,
+                        encoder_hidden_states=controlnet_prompt_embeds,
+                        controlnet_cond=control_image,
+                        conditioning_scale=cond_scale,
+                        guess_mode=guess_mode,
+                        return_dict=False,
+                    )
+
+                    if guess_mode and self.do_classifier_free_guidance:
+                        # Infered ControlNet only for the conditional batch.
+                        # To apply the output of ControlNet to both the unconditional and conditional batches,
+                        # add 0 to the unconditional batch to keep it unchanged.
+                        down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+                        mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
+
+                    # # predict the noise residual
+                    # if num_channels_unet == 9:
+                    #     latent_model_input = torch.cat([latent_model_input, mask, masked_image_latents], dim=1)
+
+                    noise_pred = self.unet(
+                        latent_model_input,
+                        t,
+                        encoder_hidden_states=prompt_embeds,
+                        cross_attention_kwargs=self.cross_attention_kwargs,
+                        down_block_additional_residuals=down_block_res_samples,
+                        mid_block_additional_residual=mid_block_res_sample,
+                        added_cond_kwargs=added_cond_kwargs,
+                        return_dict=False,
+                    )[0]
+
+                    # perform guidance
+                    if self.do_classifier_free_guidance:
+                        noise_pred_uncond, noise_pred_text = noise_pred.chunk(2)
+                        noise_pred = noise_pred_uncond + guidance_scale * (noise_pred_text - noise_pred_uncond)
+
+                    ###
+                    # perform self-attention guidance with the stored self-attentnion map
+                    if do_self_attention_guidance:
+                        # classifier-free guidance produces two chunks of attention map
+                        # and we only use unconditional one according to equation (25)
+                        # in https://arxiv.org/pdf/2210.00939.pdf
+                        pred_x0 = self.pred_x0(latents, noise_pred_uncond, t)
+                        uncond_attn, cond_attn = store_processor.attention_probs.chunk(2)
+                        degraded_latents = self.sag_masking(
+                            pred_x0, uncond_attn, map_size, t, self.pred_epsilon(latents, noise_pred_uncond, t)
+                        )
+                        uncond_emb, _ = prompt_embeds.chunk(2)
+
+                        down_block_res_samples, mid_block_res_sample = self.controlnet(
+                            torch.cat([degraded_latents, mask.chunk(2)[0], masked_image_latents.chunk(2)[0]], dim=1),
+                            t,
+                            encoder_hidden_states=uncond_emb,
+                            controlnet_cond=control_image.chunk(2)[0],
+                            conditioning_scale=cond_scale,
+                            guess_mode=guess_mode,
+                            return_dict=False,
                         )
 
-                    latents = (1 - init_mask) * init_latents_proper + init_mask * latents
+                        if guess_mode and self.do_classifier_free_guidance:
+                            # Infered ControlNet only for the conditional batch.
+                            # To apply the output of ControlNet to both the unconditional and conditional batches,
+                            # add 0 to the unconditional batch to keep it unchanged.
+                            down_block_res_samples = [torch.cat([torch.zeros_like(d), d]) for d in down_block_res_samples]
+                            mid_block_res_sample = torch.cat([torch.zeros_like(mid_block_res_sample), mid_block_res_sample])
 
-                if callback_on_step_end is not None:
-                    callback_kwargs = {}
-                    for k in callback_on_step_end_tensor_inputs:
-                        callback_kwargs[k] = locals()[k]
-                    callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+                        degraded_pred = self.unet(
+                            torch.cat([degraded_latents, mask.chunk(2)[0], masked_image_latents.chunk(2)[0]], dim=1),
+                            t,
+                            encoder_hidden_states=uncond_emb,
+                            cross_attention_kwargs=self.cross_attention_kwargs,
+                            down_block_additional_residuals=down_block_res_samples,
+                            mid_block_additional_residual=mid_block_res_sample,
+                            added_cond_kwargs=added_uncond_kwargs,
+                            return_dict=False,
+                        )[0]
+                        noise_pred += sag_scale * (noise_pred - degraded_pred)
+                    ###
 
-                    latents = callback_outputs.pop("latents", latents)
-                    prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
-                    negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+                    # compute the previous noisy sample x_t -> x_t-1
+                    latents = self.scheduler.step(noise_pred, t, latents, **extra_step_kwargs, return_dict=False)[0]
 
-                # call the callback, if provided
-                if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
-                    progress_bar.update()
-                    if callback is not None and i % callback_steps == 0:
-                        step_idx = i // getattr(self.scheduler, "order", 1)
-                        callback(step_idx, t, latents)
+                    if num_channels_unet == 4:
+                        init_latents_proper = image_latents
+                        if self.do_classifier_free_guidance:
+                            init_mask, _ = mask.chunk(2)
+                        else:
+                            init_mask = mask
+
+                        if i < len(timesteps) - 1:
+                            noise_timestep = timesteps[i + 1]
+                            init_latents_proper = self.scheduler.add_noise(
+                                init_latents_proper, noise, torch.tensor([noise_timestep])
+                            )
+
+                        latents = (1 - init_mask) * init_latents_proper + init_mask * latents
+
+                    if callback_on_step_end is not None:
+                        callback_kwargs = {}
+                        for k in callback_on_step_end_tensor_inputs:
+                            callback_kwargs[k] = locals()[k]
+                        callback_outputs = callback_on_step_end(self, i, t, callback_kwargs)
+
+                        latents = callback_outputs.pop("latents", latents)
+                        prompt_embeds = callback_outputs.pop("prompt_embeds", prompt_embeds)
+                        negative_prompt_embeds = callback_outputs.pop("negative_prompt_embeds", negative_prompt_embeds)
+
+                    # call the callback, if provided
+                    if i == len(timesteps) - 1 or ((i + 1) > num_warmup_steps and (i + 1) % self.scheduler.order == 0):
+                        progress_bar.update()
+                        if callback is not None and i % callback_steps == 0:
+                            step_idx = i // getattr(self.scheduler, "order", 1)
+                            callback(step_idx, t, latents)
 
         # If we do sequential model offloading, let's offload unet and controlnet
         # manually for max memory savings
@@ -1618,3 +1717,93 @@ class StableDiffusionControlNetInpaintPipeline(
             return (image, has_nsfw_concept)
 
         return StableDiffusionPipelineOutput(images=image, nsfw_content_detected=has_nsfw_concept)
+
+    def sag_masking(self, original_latents, attn_map, map_size, t, eps):
+        # Same masking process as in SAG paper: https://arxiv.org/pdf/2210.00939.pdf
+        bh, hw1, hw2 = attn_map.shape
+        b, latent_channel, latent_h, latent_w = original_latents.shape
+        h = self.unet.config.attention_head_dim
+        if isinstance(h, list):
+            h = h[-1]
+
+        # Produce attention mask
+        attn_map = attn_map.reshape(b, h, hw1, hw2)
+        attn_mask = attn_map.mean(1, keepdim=False).sum(1, keepdim=False) > 1.0
+        attn_mask = (
+            attn_mask.reshape(b, map_size[0], map_size[1])
+            .unsqueeze(1)
+            .repeat(1, latent_channel, 1, 1)
+            .type(attn_map.dtype)
+        )
+        attn_mask = F.interpolate(attn_mask, (latent_h, latent_w))
+
+        # Blur according to the self-attention mask
+        degraded_latents = gaussian_blur_2d(original_latents, kernel_size=9, sigma=1.0)
+        degraded_latents = degraded_latents * attn_mask + original_latents * (1 - attn_mask)
+
+        # Noise it again to match the noise level
+        degraded_latents = self.scheduler.add_noise(degraded_latents, noise=eps, timesteps=t[None])
+
+        return degraded_latents
+
+    # Modified from diffusers.schedulers.scheduling_ddim.DDIMScheduler.step
+    # Note: there are some schedulers that clip or do not return x_0 (PNDMScheduler, DDIMScheduler, etc.)
+    def pred_x0(self, sample, model_output, timestep):
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep].to(sample.device)
+
+        beta_prod_t = 1 - alpha_prod_t
+        if self.scheduler.config.prediction_type == "epsilon":
+            pred_original_sample = (sample - beta_prod_t ** (0.5) * model_output) / alpha_prod_t ** (0.5)
+        elif self.scheduler.config.prediction_type == "sample":
+            pred_original_sample = model_output
+        elif self.scheduler.config.prediction_type == "v_prediction":
+            pred_original_sample = (alpha_prod_t**0.5) * sample - (beta_prod_t**0.5) * model_output
+            # predict V
+            model_output = (alpha_prod_t**0.5) * model_output + (beta_prod_t**0.5) * sample
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.scheduler.config.prediction_type} must be one of `epsilon`, `sample`,"
+                " or `v_prediction`"
+            )
+
+        return pred_original_sample
+
+    def pred_epsilon(self, sample, model_output, timestep):
+        alpha_prod_t = self.scheduler.alphas_cumprod[timestep]
+
+        beta_prod_t = 1 - alpha_prod_t
+        if self.scheduler.config.prediction_type == "epsilon":
+            pred_eps = model_output
+        elif self.scheduler.config.prediction_type == "sample":
+            pred_eps = (sample - (alpha_prod_t**0.5) * model_output) / (beta_prod_t**0.5)
+        elif self.scheduler.config.prediction_type == "v_prediction":
+            pred_eps = (beta_prod_t**0.5) * sample + (alpha_prod_t**0.5) * model_output
+        else:
+            raise ValueError(
+                f"prediction_type given as {self.scheduler.config.prediction_type} must be one of `epsilon`, `sample`,"
+                " or `v_prediction`"
+            )
+
+        return pred_eps
+
+
+# Gaussian blur
+def gaussian_blur_2d(img, kernel_size, sigma):
+    ksize_half = (kernel_size - 1) * 0.5
+
+    x = torch.linspace(-ksize_half, ksize_half, steps=kernel_size)
+
+    pdf = torch.exp(-0.5 * (x / sigma).pow(2))
+
+    x_kernel = pdf / pdf.sum()
+    x_kernel = x_kernel.to(device=img.device, dtype=img.dtype)
+
+    kernel2d = torch.mm(x_kernel[:, None], x_kernel[None, :])
+    kernel2d = kernel2d.expand(img.shape[-3], 1, kernel2d.shape[0], kernel2d.shape[1])
+
+    padding = [kernel_size // 2, kernel_size // 2, kernel_size // 2, kernel_size // 2]
+
+    img = F.pad(img, padding, mode="reflect")
+    img = F.conv2d(img, kernel2d, groups=img.shape[-3])
+
+    return img
